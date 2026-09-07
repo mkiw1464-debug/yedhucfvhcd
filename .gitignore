@@ -1,0 +1,36 @@
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+*.iml
+
+# iOS
+ios/Flutter/
+ios/Pods/
+ios/.symlinks/
+ios/Runner.xcworkspace/
+*.xcuserstate
+ios/Runner/GeneratedPluginRegistrant.h
+ios/Runner/GeneratedPluginRegistrant.m
+
+# Xcode
+*.xccheckout
+*.xcscmblueprint
+DerivedData/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.lock~
+
+# Secrets
+*.p12
+*.mobileprovision
+.env
