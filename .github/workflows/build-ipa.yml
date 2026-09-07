@@ -2,10 +2,14 @@ name: Build FF External IPA
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
 
   pull_request:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
 
   workflow_dispatch:
 
@@ -15,56 +19,78 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      # ─── Checkout ───────────────────────────────────────────────
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ─── Flutter setup ─────────────────────────────────────────
+      # ============================================================
+      # FLUTTER
+      # ============================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'
+          flutter-version: "3.22.0"
           channel: stable
           cache: true
 
-      # ─── Ruby + CocoaPods ──────────────────────────────────────
+      # ============================================================
+      # RUBY / COCOAPODS
+      # ============================================================
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.2'
-          bundler-cache: true
+          ruby-version: "3.2"
+          bundler-cache: false
 
       - name: Install CocoaPods
         run: |
           gem install cocoapods --no-document
           pod --version
 
-      # ─── Flutter dependencies ─────────────────────────────────
-      - name: Get Flutter dependencies
+      # ============================================================
+      # FLUTTER DEPENDENCIES
+      # ============================================================
+      - name: Flutter clean
+        run: flutter clean
+
+      - name: Flutter pub get
         run: flutter pub get
 
-      # ─── Generate localization ─────────────────────────────────
-      - name: Generate localization files
-        run: flutter gen-l10n
+      # ============================================================
+      # LOCALIZATION
+      # ============================================================
+      - name: Generate localization
+        run: |
+          if [ -f "l10n.yaml" ]; then
+            flutter gen-l10n
+          else
+            echo "No l10n.yaml found, skipping localization generation."
+          fi
 
-      # ─── Generate missing iOS project ──────────────────────────
+      # ============================================================
+      # GENERATE IOS PROJECT IF MISSING
+      # ============================================================
       - name: Generate iOS project
         run: |
           if [ ! -f "ios/Runner.xcodeproj/project.pbxproj" ]; then
-            echo "Runner.xcodeproj is missing."
-            echo "Generating iOS project with Flutter..."
+            echo "Runner.xcodeproj missing."
+            echo "Generating iOS project..."
             flutter create --platforms=ios .
           else
             echo "Runner.xcodeproj already exists."
           fi
 
-      # ─── Verify iOS project ────────────────────────────────────
+      # ============================================================
+      # VERIFY IOS PROJECT
+      # ============================================================
       - name: Verify iOS project
         run: |
           echo "Checking iOS project..."
 
           if [ ! -f "ios/Runner.xcodeproj/project.pbxproj" ]; then
-            echo "ERROR: ios/Runner.xcodeproj/project.pbxproj was not generated."
+            echo "ERROR: Runner.xcodeproj/project.pbxproj is missing."
             exit 1
           fi
 
@@ -74,52 +100,119 @@ jobs:
           fi
 
           echo "iOS project OK."
-          find ios -maxdepth 2 -type f | sort | head -100
 
-      # ─── CocoaPods ─────────────────────────────────────────────
+      # ============================================================
+      # POD INSTALL
+      # ============================================================
       - name: CocoaPods install
         working-directory: ios
         run: |
           pod install --repo-update
 
-        env:
-          CI: true
-
-      # ─── Xcode select ──────────────────────────────────────────
-      - name: Select Xcode version
+      # ============================================================
+      # DISABLE CODE SIGNING
+      # ============================================================
+      - name: Disable iOS code signing
         run: |
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          xcodebuild -version
+          python3 <<'PY'
+          from pathlib import Path
 
-      # ─── Build iOS ─────────────────────────────────────────────
-      - name: Build iOS (no codesign)
+          project = Path("ios/Runner.xcodeproj/project.pbxproj")
+
+          if not project.exists():
+              raise SystemExit("Runner.xcodeproj/project.pbxproj not found")
+
+          text = project.read_text()
+
+          replacements = {
+              "CODE_SIGNING_ALLOWED = YES;":
+                  "CODE_SIGNING_ALLOWED = NO;",
+
+              "CODE_SIGNING_REQUIRED = YES;":
+                  "CODE_SIGNING_REQUIRED = NO;",
+
+              'CODE_SIGN_IDENTITY = "iPhone Developer";':
+                  'CODE_SIGN_IDENTITY = "";',
+
+              'CODE_SIGN_IDENTITY = "Apple Development";':
+                  'CODE_SIGN_IDENTITY = "";',
+
+              'CODE_SIGN_IDENTITY[sdk=iphoneos*] = "iPhone Developer";':
+                  'CODE_SIGN_IDENTITY[sdk=iphoneos*] = "";',
+
+              'CODE_SIGN_IDENTITY[sdk=iphoneos*] = "Apple Development";':
+                  'CODE_SIGN_IDENTITY[sdk=iphoneos*] = "";',
+          }
+
+          for old, new in replacements.items():
+              text = text.replace(old, new)
+
+          project.write_text(text)
+
+          print("========================================")
+          print("iOS code signing disabled")
+          print("========================================")
+          PY
+
+      # ============================================================
+      # VERIFY SIGNING SETTINGS
+      # ============================================================
+      - name: Verify signing settings
         run: |
-          flutter build ios --release --no-codesign
+          echo "Checking signing configuration..."
 
-      # ─── Create IPA ────────────────────────────────────────────
-      - name: Create Payload and IPA
+          grep -n "CODE_SIGNING_ALLOWED" \
+            ios/Runner.xcodeproj/project.pbxproj || true
+
+          grep -n "CODE_SIGNING_REQUIRED" \
+            ios/Runner.xcodeproj/project.pbxproj || true
+
+          echo "Signing configuration checked."
+
+      # ============================================================
+      # BUILD IOS
+      # ============================================================
+      - name: Build iOS
+        run: |
+          flutter build ios \
+            --release \
+            --no-codesign
+
+      # ============================================================
+      # CREATE IPA
+      # ============================================================
+      - name: Create unsigned IPA
         run: |
           set -e
 
+          APP_PATH="build/ios/iphoneos/Runner.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: Runner.app was not generated."
+            exit 1
+          fi
+
+          rm -rf build/ios/ipa
           mkdir -p build/ios/ipa/Payload
 
-          cp -R build/ios/iphoneos/Runner.app \
-            build/ios/ipa/Payload/
+          cp -R "$APP_PATH" build/ios/ipa/Payload/Runner.app
 
           cd build/ios/ipa
 
-          zip -r ../../../FFExternal.ipa Payload
+          zip -r ../../../../FFExternal.ipa Payload
 
           cd ../../..
 
           echo "========================================"
-          echo "IPA created successfully"
+          echo "IPA BUILD SUCCESSFUL"
           echo "========================================"
 
           ls -lh FFExternal.ipa
 
-      # ─── Upload IPA ────────────────────────────────────────────
-      - name: Upload IPA artifact
+      # ============================================================
+      # UPLOAD IPA
+      # ============================================================
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: FFExternal-IPA
