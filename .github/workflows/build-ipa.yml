@@ -1,21 +1,16 @@
-name: Build FF External IPA
+name: Build Unsigned IPA
 
 on:
+  workflow_dispatch:
+
   push:
     branches:
       - main
       - master
 
-  pull_request:
-    branches:
-      - main
-      - master
-
-  workflow_dispatch:
-
 jobs:
   build-ios:
-    name: Build iOS IPA
+    name: Build Unsigned iOS IPA
     runs-on: macos-latest
 
     steps:
@@ -36,7 +31,7 @@ jobs:
           cache: true
 
       # ============================================================
-      # RUBY / COCOAPODS
+      # RUBY
       # ============================================================
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
@@ -44,6 +39,9 @@ jobs:
           ruby-version: "3.2"
           bundler-cache: false
 
+      # ============================================================
+      # COCOAPODS
+      # ============================================================
       - name: Install CocoaPods
         run: |
           gem install cocoapods --no-document
@@ -59,17 +57,6 @@ jobs:
         run: flutter pub get
 
       # ============================================================
-      # LOCALIZATION
-      # ============================================================
-      - name: Generate localization
-        run: |
-          if [ -f "l10n.yaml" ]; then
-            flutter gen-l10n
-          else
-            echo "No l10n.yaml found, skipping localization generation."
-          fi
-
-      # ============================================================
       # GENERATE IOS PROJECT IF MISSING
       # ============================================================
       - name: Generate iOS project
@@ -79,7 +66,7 @@ jobs:
             echo "Generating iOS project..."
             flutter create --platforms=ios .
           else
-            echo "Runner.xcodeproj already exists."
+            echo "Runner.xcodeproj exists."
           fi
 
       # ============================================================
@@ -87,96 +74,127 @@ jobs:
       # ============================================================
       - name: Verify iOS project
         run: |
-          echo "Checking iOS project..."
+          set -e
 
-          if [ ! -f "ios/Runner.xcodeproj/project.pbxproj" ]; then
-            echo "ERROR: Runner.xcodeproj/project.pbxproj is missing."
-            exit 1
-          fi
+          test -f ios/Runner.xcodeproj/project.pbxproj
+          test -f ios/Podfile
 
-          if [ ! -f "ios/Podfile" ]; then
-            echo "ERROR: ios/Podfile is missing."
-            exit 1
-          fi
-
-          echo "iOS project OK."
+          echo "Runner.xcodeproj: OK"
+          echo "Podfile: OK"
 
       # ============================================================
       # POD INSTALL
       # ============================================================
-      - name: CocoaPods install
+      - name: Install Pods
         working-directory: ios
         run: |
           pod install --repo-update
 
       # ============================================================
-      # DISABLE CODE SIGNING
+      # DISABLE SIGNING IN RUNNER PROJECT
       # ============================================================
-      - name: Disable iOS code signing
+      - name: Disable code signing
         run: |
           python3 <<'PY'
           from pathlib import Path
+          import re
 
-          project = Path("ios/Runner.xcodeproj/project.pbxproj")
+          path = Path("ios/Runner.xcodeproj/project.pbxproj")
 
-          if not project.exists():
+          if not path.exists():
               raise SystemExit("Runner.xcodeproj/project.pbxproj not found")
 
-          text = project.read_text()
+          text = path.read_text()
 
-          replacements = {
-              "CODE_SIGNING_ALLOWED = YES;":
-                  "CODE_SIGNING_ALLOWED = NO;",
+          # Disable code signing
+          text = re.sub(
+              r'CODE_SIGNING_ALLOWED\s*=\s*YES;',
+              'CODE_SIGNING_ALLOWED = NO;',
+              text
+          )
 
-              "CODE_SIGNING_REQUIRED = YES;":
-                  "CODE_SIGNING_REQUIRED = NO;",
+          text = re.sub(
+              r'CODE_SIGNING_REQUIRED\s*=\s*YES;',
+              'CODE_SIGNING_REQUIRED = NO;',
+              text
+          )
 
-              'CODE_SIGN_IDENTITY = "iPhone Developer";':
-                  'CODE_SIGN_IDENTITY = "";',
+          # Remove development team
+          text = re.sub(
+              r'^\s*DEVELOPMENT_TEAM\s*=.*?;\s*$',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-              'CODE_SIGN_IDENTITY = "Apple Development";':
-                  'CODE_SIGN_IDENTITY = "";',
+          # Remove provisioning profile
+          text = re.sub(
+              r'^\s*PROVISIONING_PROFILE_SPECIFIER\s*=.*?;\s*$',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-              'CODE_SIGN_IDENTITY[sdk=iphoneos*] = "iPhone Developer";':
-                  'CODE_SIGN_IDENTITY[sdk=iphoneos*] = "";',
+          # Disable automatic signing
+          text = text.replace(
+              'ProvisioningStyle = Automatic;',
+              'ProvisioningStyle = Manual;'
+          )
 
-              'CODE_SIGN_IDENTITY[sdk=iphoneos*] = "Apple Development";':
-                  'CODE_SIGN_IDENTITY[sdk=iphoneos*] = "";',
-          }
-
-          for old, new in replacements.items():
-              text = text.replace(old, new)
-
-          project.write_text(text)
+          path.write_text(text)
 
           print("========================================")
-          print("iOS code signing disabled")
+          print("CODE SIGNING DISABLED")
           print("========================================")
           PY
 
       # ============================================================
-      # VERIFY SIGNING SETTINGS
+      # CLEAN XCODE BUILD
       # ============================================================
-      - name: Verify signing settings
+      - name: Clean Xcode build
         run: |
-          echo "Checking signing configuration..."
-
-          grep -n "CODE_SIGNING_ALLOWED" \
-            ios/Runner.xcodeproj/project.pbxproj || true
-
-          grep -n "CODE_SIGNING_REQUIRED" \
-            ios/Runner.xcodeproj/project.pbxproj || true
-
-          echo "Signing configuration checked."
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            clean \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
 
       # ============================================================
-      # BUILD IOS
+      # BUILD UNSIGNED APP
       # ============================================================
-      - name: Build iOS
+      - name: Build unsigned iOS app
         run: |
-          flutter build ios \
-            --release \
-            --no-codesign
+          set -e
+
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/ios \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      # ============================================================
+      # FIND APP
+      # ============================================================
+      - name: Find Runner.app
+        run: |
+          echo "Searching for Runner.app..."
+
+          find build/ios \
+            -type d \
+            -name "Runner.app" \
+            -print
 
       # ============================================================
       # CREATE IPA
@@ -185,36 +203,69 @@ jobs:
         run: |
           set -e
 
-          APP_PATH="build/ios/iphoneos/Runner.app"
+          APP_PATH="build/ios/Build/Products/Release-iphoneos/Runner.app"
 
           if [ ! -d "$APP_PATH" ]; then
-            echo "ERROR: Runner.app was not generated."
+            echo "Standard path not found."
+            echo "Searching..."
+            
+            APP_PATH=$(find build/ios \
+              -type d \
+              -name "Runner.app" \
+              -path "*Release-iphoneos*" \
+              -print -quit)
+          fi
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: Runner.app was not found."
             exit 1
           fi
 
-          rm -rf build/ios/ipa
-          mkdir -p build/ios/ipa/Payload
+          echo "Using:"
+          echo "$APP_PATH"
 
-          cp -R "$APP_PATH" build/ios/ipa/Payload/Runner.app
+          rm -rf build/ipa
+          mkdir -p build/ipa/Payload
 
-          cd build/ios/ipa
+          cp -R "$APP_PATH" build/ipa/Payload/Runner.app
 
-          zip -r ../../../../FFExternal.ipa Payload
+          cd build/ipa
 
-          cd ../../..
+          zip -qry ../../FFExternal-unsigned.ipa Payload
+
+          cd ../..
 
           echo "========================================"
-          echo "IPA BUILD SUCCESSFUL"
+          echo "UNSIGNED IPA CREATED"
           echo "========================================"
 
-          ls -lh FFExternal.ipa
+          ls -lh FFExternal-unsigned.ipa
+
+      # ============================================================
+      # VERIFY IPA
+      # ============================================================
+      - name: Verify IPA
+        run: |
+          set -e
+
+          if [ ! -f "FFExternal-unsigned.ipa" ]; then
+            echo "ERROR: IPA was not created."
+            exit 1
+          fi
+
+          echo "IPA:"
+          ls -lh FFExternal-unsigned.ipa
+
+          echo ""
+          echo "IPA contents:"
+          unzip -l FFExternal-unsigned.ipa | head -50
 
       # ============================================================
       # UPLOAD IPA
       # ============================================================
-      - name: Upload IPA
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: FFExternal-IPA
-          path: FFExternal.ipa
+          name: FFExternal-unsigned-IPA
+          path: FFExternal-unsigned.ipa
           if-no-files-found: error
